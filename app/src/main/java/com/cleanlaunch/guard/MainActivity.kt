@@ -27,7 +27,7 @@ class MainActivity : Activity() {
             textSize = size
             setPadding(0, pad / 2, 0, pad / 2)
         }
-        root.addView(label("净启助手", 26f))
+        root.addView(label("马小跳", 26f))
         root.addView(label("帮助减少广告误触后跳转到浏览器或应用商店。"))
         root.addView(label("工作方式：使用 Android 无障碍服务识别部分广告文字和跳过按钮。"))
         root.addView(label("注意：系统限制较多，不能保证拦截所有广告或所有跳转；部分页面无法读取按钮。"))
