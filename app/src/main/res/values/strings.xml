@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">净启助手</string>
-    <string name="service_name">净启助手广告跳转防护</string>
+    <string name="app_name">马小跳</string>
+    <string name="service_name">马小跳广告防护服务</string>
     <string name="service_description">识别部分广告页面的跳过按钮，并尝试返回意外打开的浏览器或应用商店。仅在用户启用无障碍服务后工作。</string>
 </resources>
