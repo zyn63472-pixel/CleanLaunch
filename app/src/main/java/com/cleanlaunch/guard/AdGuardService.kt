@@ -62,7 +62,7 @@ class AdGuardService : AccessibilityService() {
 
         val root = rootInActiveWindow ?: return
         try {
-            val content = buildString { collectText(root, this, 0) }.lowercase()
+            val content = StringBuilder().also { collectText(root, it, 0) }.toString().lowercase()
 
             // Deny only a system permission dialog that explicitly refers to
             // body sensors / motion sensors / gyroscope. Do not touch camera,
@@ -133,12 +133,6 @@ class AdGuardService : AccessibilityService() {
             "允许", "不允许", "拒绝", "permission", "allow", "deny", "访问"
         ).any { content.contains(it) }
         return mentionsSensor && looksLikePermissionPrompt
-    }
-
-    private fun buildString(block: (StringBuilder) -> Unit): String {
-        val builder = StringBuilder()
-        block(builder)
-        return builder.toString()
     }
 
     private fun collectText(node: AccessibilityNodeInfo, out: StringBuilder, depth: Int) {
