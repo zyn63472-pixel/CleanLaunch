@@ -181,11 +181,16 @@ class AdGuardService : AccessibilityService() {
         targetPackage: String,
         activeRoot: AccessibilityNodeInfo?
     ): AccessibilityNodeInfo? {
-        if (activeRoot != null &&
-            activeRoot.packageName?.toString() == targetPackage
-        ) return activeRoot
+        // Only an actually visible active app window may authorize clicks or shields.
+        // Matching a package in Recents is not enough: task cards can expose stale
+        // accessibility nodes while the launcher is the foreground application.
+        if (activeRoot != null) {
+            val matches = activeRoot.packageName?.toString() == targetPackage &&
+                activeRoot.isVisibleToUser
+            if (matches) return activeRoot
+            activeRoot.recycle()
+        }
 
-        activeRoot?.recycle()
         val allWindows = try {
             getWindows()
         } catch (_: Exception) {
@@ -194,10 +199,13 @@ class AdGuardService : AccessibilityService() {
 
         for (window in allWindows) {
             try {
+                // Do not interact with background/inactive windows, even if their
+                // package matches the event that triggered this callback.
+                if (!window.isActive || !window.isFocused) continue
                 val candidate = window.root ?: continue
-                if (candidate.packageName?.toString() == targetPackage) {
-                    return candidate
-                }
+                val matches = candidate.packageName?.toString() == targetPackage &&
+                    candidate.isVisibleToUser
+                if (matches) return candidate
                 candidate.recycle()
             } catch (_: Exception) {
                 // A window may disappear while the system is updating its stack.
@@ -490,8 +498,11 @@ class AdGuardService : AccessibilityService() {
             out.append("事件文本：")
                 .append(event.text.joinToString(" ") { it?.toString() ?: "" })
                 .append('\n')
-            out.append("匹配应用窗口：")
-                .append(matchedRoot?.packageName?.toString() ?: "未找到同包名窗口")
+            out.append("匹配的前台应用窗口：")
+                .append(matchedRoot?.packageName?.toString() ?: "未找到（可能处于桌面/最近任务/切换动画）")
+                .append('\n')
+            out.append("处理策略：")
+                .append(if (matchedRoot == null) "不点击、不遮挡，等待目标应用真正进入前台" else "仅处理已确认的前台目标窗口")
                 .append('\n')
 
             // Capture a compact inventory of every accessible window. This makes
