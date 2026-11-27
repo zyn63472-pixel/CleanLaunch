@@ -338,12 +338,16 @@ class AdGuardService : AccessibilityService() {
         val className = node.className?.toString().orEmpty()
         val label = ((node.text?.toString() ?: "") + " " +
             (node.contentDescription?.toString() ?: "")).lowercase()
-        if (node.isVisibleToUser && node.isEnabled &&
+        val validBounds = bounds.width() > 1 && bounds.height() > 1 &&
+            bounds.right > 0 && bounds.bottom > 0 &&
+            bounds.left < resources.displayMetrics.widthPixels &&
+            bounds.top < resources.displayMetrics.heightPixels
+        if (node.isVisibleToUser && node.isEnabled && validBounds &&
             className.contains("NativeVideoAdView", ignoreCase = true)
         ) {
             adBounds.add(Rect(bounds))
         }
-        if (node.isVisibleToUser && node.isEnabled &&
+        if (node.isVisibleToUser && node.isEnabled && validBounds &&
             (label.contains("跳过") || label.contains("skip"))
         ) {
             skipBounds.add(Rect(bounds))
@@ -385,7 +389,9 @@ class AdGuardService : AccessibilityService() {
     }
 
     private fun collectText(node: AccessibilityNodeInfo, out: StringBuilder, depth: Int) {
-        if (depth > 20) return
+        // Ignore stale/off-screen accessibility nodes. Some apps keep hidden
+        // carousel pages and recycled ad controls in the tree with visible=false.
+        if (depth > 20 || !node.isVisibleToUser) return
         node.text?.let { out.append(it).append(' ') }
         node.contentDescription?.let { out.append(it).append(' ') }
         for (i in 0 until node.childCount) {
@@ -471,11 +477,15 @@ class AdGuardService : AccessibilityService() {
         val label = ((node.text?.toString() ?: "") + " " +
             (node.contentDescription?.toString() ?: "")).lowercase()
 
+        val targetBounds = Rect().also { node.getBoundsInScreen(it) }
+        val validTargetBounds = targetBounds.width() > 1 && targetBounds.height() > 1 &&
+            targetBounds.right > 0 && targetBounds.bottom > 0 &&
+            targetBounds.left < resources.displayMetrics.widthPixels &&
+            targetBounds.top < resources.displayMetrics.heightPixels
         if ((label.contains("跳过") || label.contains("skip")) &&
-            node.isVisibleToUser && node.isEnabled
+            node.isVisibleToUser && node.isEnabled && validTargetBounds
         ) {
             if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-            val targetBounds = Rect().also { node.getBoundsInScreen(it) }
             val parent = node.parent
             if (parent != null) {
                 try {
