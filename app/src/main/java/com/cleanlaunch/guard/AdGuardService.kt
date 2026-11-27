@@ -350,7 +350,7 @@ class AdGuardService : AccessibilityService() {
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             try {
-                collectShieldTargets(child, adBounds, skipBounds, depth + 1)
+                collectShieldTargets(child, adBounds, safeControlBounds, depth + 1)
             } finally {
                 child.recycle()
             }
