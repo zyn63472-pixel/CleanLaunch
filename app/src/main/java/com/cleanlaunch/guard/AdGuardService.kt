@@ -60,35 +60,72 @@ class AdGuardService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
-        if (!protectedPackages.contains(pkg)) {
-            removeAdTouchShield()
-        }
         val now = System.currentTimeMillis()
 
-        // Remember the two apps being tested, so a later ad-triggered app switch
-        // can be attributed to the correct source application.
+        if (!protectedPackages.contains(pkg)) removeAdTouchShield()
+
+        // Resolve the event's own app window, not blindly rootInActiveWindow.
+        // The active root can belong to System UI / Recents while the event still
+        // carries the package name of the app underneath it.
+        val root = if (protectedPackages.contains(pkg)) {
+            findRootForPackage(pkg, rootInActiveWindow)
+        } else {
+            rootInActiveWindow
+        }
+
         if (protectedPackages.contains(pkg)) {
+            recordDiagnostic(event, pkg, root)
+            // Do not treat a stale event package as proof that the protected app
+            // is currently visible. This prevents Recents/task-switcher nodes from
+            // being mistaken for the ad page.
+            if (root == null) {
+                removeAdTouchShield()
+                return
+            }
             lastProtectedPackage = pkg
             lastProtectedAt = now
         }
 
-        val root = rootInActiveWindow
-        if (protectedPackages.contains(pkg)) {
-            recordDiagnostic(event, pkg, root)
+        // Redirect recovery must run even if the destination window has no readable root.
+        val isSystemUi = pkg.startsWith("com.android.systemui") ||
+            pkg.startsWith("com.google.android.inputmethod") ||
+            pkg.contains("inputmethod") ||
+            pkg.contains("launcher") ||
+            pkg == "com.android.launcher" ||
+            pkg == "com.google.android.apps.nexuslauncher" ||
+            permissionControllerPackages.contains(pkg)
+
+        val recentAd = now - lastAdSignalAt < 10_000
+        val recentProtectedApp = now - lastProtectedAt < 12_000
+        val knownRedirect = redirectPackages.contains(pkg)
+        val unexpectedSwitchAfterAd =
+            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            recentAd && recentProtectedApp &&
+            lastProtectedPackage != null &&
+            pkg != lastProtectedPackage &&
+            !protectedPackages.contains(pkg) &&
+            !isSystemUi
+
+        if ((knownRedirect && recentAd) || unexpectedSwitchAfterAd) {
+            if (now - lastBackAt > 1_200) {
+                lastBackAt = now
+                if (performGlobalAction(GLOBAL_ACTION_BACK)) {
+                    recordBlock("检测到广告后跳转至 $pkg，已尝试返回原应用")
+                }
+            }
         }
+
         if (root == null) return
         try {
             val content = StringBuilder().also { collectText(root, it, 0) }.toString().lowercase()
 
             // Deny only a system permission dialog that explicitly refers to
-            // body sensors / motion sensors / gyroscope. Do not touch camera,
-            // microphone, photos, or unrelated permission prompts.
+            // body sensors / motion sensors / gyroscope.
             if (permissionControllerPackages.contains(pkg) &&
                 containsSensorPermissionRequest(content)
             ) {
                 if (clickByLabels(root, denyWords)) {
                     recordBlock("已拒绝传感器相关权限请求")
-                    // Continue processing the current event; do not stop monitoring.
                 }
                 return
             }
@@ -100,13 +137,9 @@ class AdGuardService : AccessibilityService() {
 
             val hasSkipSignal = listOf("跳过", "跳过广告", "略过", "skip", "skip ad")
                 .any { content.contains(it) }
-            // Some SDK ad containers expose no readable "广告" text at all.
-            // Treat the known visible ad-view class as an independent ad signal.
             val hasAdContainer = protectedPackages.contains(pkg) && hasKnownAdContainer(root)
             val isAdSurface = hasAdSignal || hasAdContainer
 
-            // Shield only the known ad-content view, not the whole screen.
-            // A visible skip button is cut out of the shield area when it overlaps.
             if (protectedPackages.contains(pkg) && isAdSurface) {
                 updateAdTouchShield(root)
             } else {
@@ -119,18 +152,12 @@ class AdGuardService : AccessibilityService() {
                 lastAdSignalAt = now
             }
 
-            // Prefer the actual skip control (its position may vary, including
-            // the lower-left corner). Never assume a fixed screen coordinate.
             val skipClicked = protectedPackages.contains(pkg) &&
                 now - lastAdSignalAt < 10_000 &&
                 hasSkipSignal &&
                 clickSkip(root, 0)
-            if (skipClicked) {
-                recordBlock("识别并尝试点击广告跳过按钮")
-            }
+            if (skipClicked) recordBlock("识别并尝试点击广告跳过按钮")
 
-            // Use the explicit close-ad control only as a fallback when no
-            // visible skip control was successfully clicked.
             if (!skipClicked &&
                 protectedPackages.contains(pkg) &&
                 now - lastAdSignalAt < 10_000 &&
@@ -140,33 +167,45 @@ class AdGuardService : AccessibilityService() {
                     recordBlock("识别并尝试点击关闭广告按钮")
                 }
             }
-
-            val isSystemUi = pkg.startsWith("com.android.systemui") ||
-                pkg.startsWith("com.google.android.inputmethod") ||
-                pkg.contains("inputmethod") ||
-                permissionControllerPackages.contains(pkg)
-
-            val recentAd = now - lastAdSignalAt < 10_000
-            val recentProtectedApp = now - lastProtectedAt < 12_000
-            val knownRedirect = redirectPackages.contains(pkg)
-            val unexpectedSwitchAfterAd = recentAd &&
-                recentProtectedApp &&
-                lastProtectedPackage != null &&
-                pkg != lastProtectedPackage &&
-                !protectedPackages.contains(pkg) &&
-                !isSystemUi
-
-            if ((knownRedirect && recentAd) || unexpectedSwitchAfterAd) {
-                if (now - lastBackAt > 1_200) {
-                    lastBackAt = now
-                    if (performGlobalAction(GLOBAL_ACTION_BACK)) {
-                        recordBlock("检测到广告后跳转至 $pkg，已尝试返回原应用")
-                    }
-                }
-            }
         } finally {
             root.recycle()
         }
+    }
+
+    /**
+     * GKD-inspired window/context matching: resolve a node tree for the exact
+     * package that emitted the event. A stale event must never authorize actions
+     * against a different app's active root.
+     */
+    private fun findRootForPackage(
+        targetPackage: String,
+        activeRoot: AccessibilityNodeInfo?
+    ): AccessibilityNodeInfo? {
+        if (activeRoot != null &&
+            activeRoot.packageName?.toString() == targetPackage
+        ) return activeRoot
+
+        activeRoot?.recycle()
+        val allWindows = try {
+            getWindows()
+        } catch (_: Exception) {
+            return null
+        }
+
+        for (window in allWindows) {
+            try {
+                val candidate = window.root ?: continue
+                if (candidate.packageName?.toString() == targetPackage) {
+                    return candidate
+                }
+                candidate.recycle()
+            } catch (_: Exception) {
+                // A window may disappear while the system is updating its stack.
+            } finally {
+                try { window.recycle() } catch (_: Exception) {}
+            }
+        }
+        return null
     }
 
     private fun hasKnownAdContainer(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
@@ -439,22 +478,61 @@ class AdGuardService : AccessibilityService() {
     private fun recordDiagnostic(
         event: AccessibilityEvent,
         pkg: String,
-        root: AccessibilityNodeInfo?
+        matchedRoot: AccessibilityNodeInfo?
     ) {
         try {
             val out = StringBuilder()
             out.append("时间：").append(java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
                 .format(java.util.Date())).append('\n')
-            out.append("包名：").append(pkg).append('\n')
+            out.append("事件包名：").append(pkg).append('\n')
             out.append("事件类型：").append(event.eventType).append('\n')
+            out.append("事件窗口ID：").append(event.windowId).append('\n')
             out.append("事件文本：")
                 .append(event.text.joinToString(" ") { it?.toString() ?: "" })
                 .append('\n')
-            if (root == null) {
-                out.append("活动窗口：无法读取（rootInActiveWindow=null）")
-            } else {
-                out.append("窗口节点：\n")
-                appendDiagnosticNodes(root, out, 0, intArrayOf(0))
+            out.append("匹配应用窗口：")
+                .append(matchedRoot?.packageName?.toString() ?: "未找到同包名窗口")
+                .append('\n')
+
+            // Capture a compact inventory of every accessible window. This makes
+            // Recents/System UI overlays distinguishable from the underlying app.
+            val allWindows = try { getWindows() } catch (_: Exception) { emptyList() }
+            var nodeBudget = 0
+            for (window in allWindows) {
+                try {
+                    val bounds = Rect()
+                    window.getBoundsInScreen(bounds)
+                    val windowRoot = window.root
+                    try {
+                        out.append("窗口：id=").append(window.id)
+                            .append(" type=").append(window.type)
+                            .append(" layer=").append(window.layer)
+                            .append(" active=").append(window.isActive)
+                            .append(" focused=").append(window.isFocused)
+                            .append(" bounds=").append(bounds.flattenToString())
+                            .append(" rootPkg=").append(windowRoot?.packageName?.toString() ?: "null")
+                            .append('\n')
+                        if (windowRoot != null &&
+                            (windowRoot.packageName?.toString() == pkg || window.isActive) &&
+                            nodeBudget < 80
+                        ) {
+                            val count = intArrayOf(nodeBudget)
+                            appendDiagnosticNodes(windowRoot, out, 1, count)
+                            nodeBudget = count[0]
+                        }
+                    } finally {
+                        windowRoot?.recycle()
+                    }
+                } catch (_: Exception) {
+                    out.append("窗口：读取时已消失\n")
+                } finally {
+                    try { window.recycle() } catch (_: Exception) {}
+                }
+                if (out.length >= 11000) break
+            }
+            if (allWindows.isEmpty() && matchedRoot != null) {
+                out.append("匹配窗口节点：\n")
+                appendDiagnosticNodes(matchedRoot, out, 0, intArrayOf(0))
             }
             getSharedPreferences("cleanlaunch", MODE_PRIVATE).edit()
                 .putString("last_diagnostic", out.toString().take(12000))
