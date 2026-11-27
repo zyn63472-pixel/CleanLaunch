@@ -149,11 +149,25 @@ class AdGuardService : AccessibilityService() {
                 lastAdSignalAt = now
             }
 
-            val skipClicked = isProtectedTarget(pkg) &&
+            val skipClickedByLabel = isProtectedTarget(pkg) &&
                 now - lastAdSignalAt < 10_000 &&
                 hasSkipSignal &&
                 clickSkip(root, 0)
-            if (skipClicked) recordBlock("识别并尝试点击广告跳过按钮")
+            // 快搜搜题的 NativeVideoAdView 广告把左下角跳过控件暴露为
+            // 无文字的 View/TextView；标签识别永远找不到它。仅在确认该广告容器、
+            // 广告信号仍有效且没有可读倒计时的情况下，点击左下角小型可点击控件。
+            val skipClickedByPosition = !skipClickedByLabel &&
+                isProtectedTarget(pkg) &&
+                pkg == "com.questions.liteai" &&
+                now - lastAdSignalAt < 10_000 &&
+                hasAdContainer &&
+                !hasAdCountdown(root) &&
+                clickBottomLeftSkip(root, 0)
+            val skipClicked = skipClickedByLabel || skipClickedByPosition
+            if (skipClicked) recordBlock(
+                if (skipClickedByLabel) "识别并尝试点击广告跳过按钮"
+                else "快搜搜题广告：点击左下角无文字跳过控件"
+            )
 
             if (!skipClicked &&
                 isProtectedTarget(pkg) &&
@@ -474,6 +488,37 @@ class AdGuardService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             val clicked = try {
                 clickAdClose(child, depth + 1)
+            } finally {
+                child.recycle()
+            }
+            if (clicked) return true
+        }
+        return false
+    }
+
+    /**
+     * 快搜搜题的 NativeVideoAdView 有时把左下角“跳过”按钮暴露成无文字节点。
+     * 严格限定在屏幕左下区域的小型可点击控件，避免点击广告卡片或大面积容器。
+     */
+    private fun clickBottomLeftSkip(node: AccessibilityNodeInfo, depth: Int): Boolean {
+        if (depth > 24 || !node.isVisibleToUser || !node.isEnabled) return false
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val valid = bounds.width() in 48..240 &&
+            bounds.height() in 24..120 &&
+            bounds.left >= 0 && bounds.top >= 0 &&
+            bounds.right <= screenW / 3 &&
+            bounds.centerY() >= (screenH * 0.82f).toInt() &&
+            bounds.bottom <= screenH
+        if (valid && node.isClickable &&
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        ) return true
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val clicked = try {
+                clickBottomLeftSkip(child, depth + 1)
             } finally {
                 child.recycle()
             }
