@@ -241,13 +241,7 @@ class AdGuardService : AccessibilityService() {
 
     private fun hasKnownAdContainer(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
         if (depth > 24) return false
-        val className = node.className?.toString().orEmpty()
-        val normalizedClass = className.lowercase()
-        val knownAdClass = normalizedClass.contains("nativevideoadview") ||
-            normalizedClass.contains("nativeadview") ||
-            normalizedClass.contains("rewardedadview") ||
-            normalizedClass.contains("splashadview")
-        if (node.isVisibleToUser && node.isEnabled && knownAdClass) return true
+        if (node.isVisibleToUser && node.isEnabled && isKnownAdContainerNode(node)) return true
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = try {
@@ -262,35 +256,32 @@ class AdGuardService : AccessibilityService() {
 
     private fun updateAdTouchShield(root: AccessibilityNodeInfo) {
         val adBounds = mutableListOf<Rect>()
-        val skipBounds = mutableListOf<Rect>()
-        collectShieldTargets(root, adBounds, skipBounds, 0)
+        val safeControlBounds = mutableListOf<Rect>()
+        collectShieldTargets(root, adBounds, safeControlBounds, 0)
         val desired = mutableListOf<Rect>()
         for (ad in adBounds) {
             if (ad.width() <= 1 || ad.height() <= 1) continue
-            // If the skip control is not exposed in the accessibility tree,
-            // reserve a small lower-left safe zone for this known app's skip button.
-            val skip = skipBounds.firstOrNull { Rect.intersects(ad, it) }
-                ?: if (lastProtectedPackage == "com.questions.liteai") {
-                    Rect(
-                        ad.left,
-                        ad.top + (ad.height() * 0.76f).toInt(),
-                        ad.left + (ad.width() * 0.34f).toInt(),
-                        ad.bottom
-                    )
-                } else null
-            if (skip == null) {
-                desired.add(Rect(ad))
-            } else {
-                val cut = Rect(ad)
-                if (!cut.intersect(skip)) {
-                    desired.add(Rect(ad))
-                } else {
-                    addShieldRect(desired, ad.left, ad.top, ad.right, cut.top)
-                    addShieldRect(desired, ad.left, cut.bottom, ad.right, ad.bottom)
-                    addShieldRect(desired, ad.left, cut.top, cut.left, cut.bottom)
-                    addShieldRect(desired, cut.right, cut.top, ad.right, cut.bottom)
+
+            // Preserve only compact, visible, clickable controls near the screen
+            // edges (likely skip/close controls). Never reserve a large guessed
+            // corner region: that can leave the ad card itself tappable.
+            var uncovered = mutableListOf(Rect(ad))
+            for (control in safeControlBounds.filter { Rect.intersects(ad, it) }.take(12)) {
+                val next = mutableListOf<Rect>()
+                for (piece in uncovered) {
+                    val cut = Rect(piece)
+                    if (!cut.intersect(control)) {
+                        next.add(piece)
+                    } else {
+                        addShieldRect(next, piece.left, piece.top, piece.right, cut.top)
+                        addShieldRect(next, piece.left, cut.bottom, piece.right, piece.bottom)
+                        addShieldRect(next, piece.left, cut.top, cut.left, cut.bottom)
+                        addShieldRect(next, cut.right, cut.top, piece.right, cut.bottom)
+                    }
                 }
+                uncovered = next
             }
+            desired.addAll(uncovered)
         }
         val key = desired.joinToString("|") { "${it.left},${it.top},${it.right},${it.bottom}" }
         if (key == shieldKey) return
@@ -329,28 +320,32 @@ class AdGuardService : AccessibilityService() {
     private fun collectShieldTargets(
         node: AccessibilityNodeInfo,
         adBounds: MutableList<Rect>,
-        skipBounds: MutableList<Rect>,
+        safeControlBounds: MutableList<Rect>,
         depth: Int
     ) {
         if (depth > 24) return
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
-        val className = node.className?.toString().orEmpty()
-        val label = ((node.text?.toString() ?: "") + " " +
-            (node.contentDescription?.toString() ?: "")).lowercase()
         val validBounds = bounds.width() > 1 && bounds.height() > 1 &&
             bounds.right > 0 && bounds.bottom > 0 &&
             bounds.left < resources.displayMetrics.widthPixels &&
             bounds.top < resources.displayMetrics.heightPixels
         if (node.isVisibleToUser && node.isEnabled && validBounds &&
-            className.contains("NativeVideoAdView", ignoreCase = true)
+            isKnownAdContainerNode(node)
         ) {
             adBounds.add(Rect(bounds))
         }
-        if (node.isVisibleToUser && node.isEnabled && validBounds &&
-            (label.contains("跳过") || label.contains("skip"))
+
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenHeight = resources.displayMetrics.heightPixels
+        val compactEdgeControl = bounds.width() in 25..(screenWidth * 0.35f).toInt() &&
+            bounds.height() in 25..(screenHeight * 0.16f).toInt() &&
+            (bounds.top <= (screenHeight * 0.12f).toInt() ||
+                bounds.bottom >= (screenHeight * 0.78f).toInt())
+        if (node.isVisibleToUser && node.isEnabled && node.isClickable &&
+            validBounds && compactEdgeControl
         ) {
-            skipBounds.add(Rect(bounds))
+            safeControlBounds.add(Rect(bounds))
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -360,6 +355,19 @@ class AdGuardService : AccessibilityService() {
                 child.recycle()
             }
         }
+    }
+
+    // Some ad SDKs expose the container name as contentDescription rather
+    // than className (as in the captured 快搜搜题 window: FrameLayout /
+    // desc=NativeVideoAdView). Check both so the full-screen ad is recognized.
+    private fun isKnownAdContainerNode(node: AccessibilityNodeInfo): Boolean {
+        val identity = ((node.className?.toString() ?: "") + " " +
+            (node.contentDescription?.toString() ?: "") + " " +
+            (node.text?.toString() ?: "")).lowercase()
+        return identity.contains("nativevideoadview") ||
+            identity.contains("nativeadview") ||
+            identity.contains("rewardedadview") ||
+            identity.contains("splashadview")
     }
 
     private fun addShieldRect(out: MutableList<Rect>, left: Int, top: Int, right: Int, bottom: Int) {
