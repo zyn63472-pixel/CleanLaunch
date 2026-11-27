@@ -12,6 +12,7 @@ import android.widget.TextView
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
+    private lateinit var diagnostic: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,7 +41,7 @@ class MainActivity : Activity() {
         val count = getSharedPreferences("cleanlaunch", MODE_PRIVATE).getInt("blocked", 0)
         root.addView(label("累计处理记录：" + count + " 次"))
         root.addView(label("最近一次诊断信息（进入快搜搜题广告后，返回本应用查看）："))
-        val diagnostic = label(getSharedPreferences("cleanlaunch", MODE_PRIVATE)
+        diagnostic = label(getSharedPreferences("cleanlaunch", MODE_PRIVATE)
             .getString("last_diagnostic", "暂无诊断记录") ?: "暂无诊断记录", 11f)
         diagnostic.setTextIsSelectable(true)
         root.addView(diagnostic)
@@ -52,6 +53,12 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::status.isInitialized) refreshStatus()
+        if (::diagnostic.isInitialized) refreshDiagnostic()
+    }
+
+    private fun refreshDiagnostic() {
+        diagnostic.text = getSharedPreferences("cleanlaunch", MODE_PRIVATE)
+            .getString("last_diagnostic", "暂无诊断记录") ?: "暂无诊断记录"
     }
 
     private fun refreshStatus() {
