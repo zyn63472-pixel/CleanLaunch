@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
+import android.net.Uri
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -36,6 +37,21 @@ class MainActivity : Activity() {
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         }
         root.addView(settings)
+        val overlayPermission = Button(this).apply {
+            text = "开启广告区域防误触权限"
+            setOnClickListener {
+                if (!Settings.canDrawOverlays(this@MainActivity)) {
+                    val intent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + packageName)
+                    )
+                    startActivity(intent)
+                } else {
+                    refreshStatus()
+                }
+            }
+        }
+        root.addView(overlayPermission)
         status = label("")
         root.addView(status)
         val count = getSharedPreferences("cleanlaunch", MODE_PRIVATE).getInt("blocked", 0)
@@ -64,6 +80,8 @@ class MainActivity : Activity() {
     private fun refreshStatus() {
         val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
             ?.contains(packageName) == true
-        status.text = if (enabled) "无障碍服务：已启用（请确认系统设置中的开关）" else "无障碍服务：尚未启用"
+        val overlay = Settings.canDrawOverlays(this)
+        status.text = (if (enabled) "无障碍服务：已启用" else "无障碍服务：尚未启用") +
+            (if (overlay) "\\n广告区域防误触权限：已开启" else "\\n广告区域防误触权限：尚未开启")
     }
 }
