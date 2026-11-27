@@ -95,18 +95,14 @@ class AdGuardService : AccessibilityService() {
             pkg == "com.google.android.apps.nexuslauncher" ||
             permissionControllerPackages.contains(pkg)
 
-        val recentAd = now - lastAdSignalAt < 10_000
-        val recentProtectedApp = now - lastProtectedAt < 12_000
+        // Only treat a known browser/app-store destination as an ad redirect.
+        // A generic switch to another app (for example, the user opening ChatGPT
+        // after leaving the protected app) is normal navigation and must never
+        // trigger BACK. Keep this window short to reduce false positives.
+        val recentAd = now - lastAdSignalAt < 3_000
         val knownRedirect = redirectPackages.contains(pkg)
-        val unexpectedSwitchAfterAd =
-            event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            recentAd && recentProtectedApp &&
-            lastProtectedPackage != null &&
-            pkg != lastProtectedPackage &&
-            !protectedPackages.contains(pkg) &&
-            !isSystemUi
 
-        if ((knownRedirect && recentAd) || unexpectedSwitchAfterAd) {
+        if (knownRedirect && recentAd && !isSystemUi) {
             if (now - lastBackAt > 1_200) {
                 lastBackAt = now
                 if (performGlobalAction(GLOBAL_ACTION_BACK)) {
