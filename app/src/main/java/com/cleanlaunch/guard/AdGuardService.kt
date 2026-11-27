@@ -128,13 +128,18 @@ class AdGuardService : AccessibilityService() {
 
             val hasAdSignal = listOf(
                 "广告", "赞助内容", "推广", "sponsored", "advertisement", "ad choices",
-                "广告剩余", "广告倒计时", "精彩内容即将开始"
+                "广告剩余", "广告倒计时", "精彩内容即将开始", "广告即将结束"
             ).any { content.contains(it) }
 
             val hasSkipSignal = listOf("跳过", "跳过广告", "略过", "skip", "skip ad")
                 .any { content.contains(it) }
             val hasAdContainer = protectedPackages.contains(pkg) && hasKnownAdContainer(root)
-            val isAdSurface = hasAdSignal || hasAdContainer
+            // Countdown text is useful evidence only when it appears with an ad
+            // marker/container or an explicit skip control; ordinary page timers
+            // must not independently classify a page as an advertisement.
+            val hasCountdownSignal = hasAdCountdown(root)
+            val isAdSurface = hasAdSignal || hasAdContainer ||
+                (hasCountdownSignal && (hasAdSignal || hasAdContainer || hasSkipSignal))
 
             if (protectedPackages.contains(pkg) && isAdSurface) {
                 updateAdTouchShield(root)
@@ -212,12 +217,37 @@ class AdGuardService : AccessibilityService() {
         return null
     }
 
+    private fun hasAdCountdown(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > 24 || !node.isVisibleToUser) return false
+        val text = ((node.text?.toString() ?: "") + " " +
+            (node.contentDescription?.toString() ?: "")).lowercase()
+        val countdownPatterns = listOf(
+            Regex("(跳过|skip)\\s*[:：]?\\s*\\d+"),
+            Regex("\\d+\\s*(秒|秒后|s)\\s*(后)?\\s*(跳过|skip)"),
+            Regex("(广告|ad).{0,12}\\d+\\s*(秒|s)")
+        )
+        if (countdownPatterns.any { it.containsMatchIn(text) }) return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = try {
+                hasAdCountdown(child, depth + 1)
+            } finally {
+                child.recycle()
+            }
+            if (found) return true
+        }
+        return false
+    }
+
     private fun hasKnownAdContainer(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
         if (depth > 24) return false
         val className = node.className?.toString().orEmpty()
-        if (node.isVisibleToUser && node.isEnabled &&
-            className.contains("NativeVideoAdView", ignoreCase = true)
-        ) return true
+        val normalizedClass = className.lowercase()
+        val knownAdClass = normalizedClass.contains("nativevideoadview") ||
+            normalizedClass.contains("nativeadview") ||
+            normalizedClass.contains("rewardedadview") ||
+            normalizedClass.contains("splashadview")
+        if (node.isVisibleToUser && node.isEnabled && knownAdClass) return true
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = try {
