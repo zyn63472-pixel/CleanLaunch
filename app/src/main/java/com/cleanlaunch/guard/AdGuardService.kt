@@ -1,6 +1,9 @@
 package com.cleanlaunch.guard
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -182,18 +185,41 @@ class AdGuardService : AccessibilityService() {
         if (depth > 20) return false
         val label = ((node.text?.toString() ?: "") + " " +
             (node.contentDescription?.toString() ?: "")).lowercase()
+        val isSkipLabel = label.contains("跳过") ||
+            label.contains("skip") ||
+            label.contains("跳过广告")
 
-        if ((label.contains("跳过") || label.contains("skip")) &&
-            node.isVisibleToUser && node.isEnabled
-        ) {
-            if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-            val parent = node.parent
-            if (parent != null) {
-                try {
-                    if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
-                } finally {
-                    parent.recycle()
+        if (isSkipLabel && node.isVisibleToUser && node.isEnabled) {
+            // The text node itself is often not clickable. Walk several ancestors
+            // instead of assuming the clickable container is the immediate parent.
+            var target: AccessibilityNodeInfo? = AccessibilityNodeInfo.obtain(node)
+            repeat(6) {
+                val current = target ?: return@repeat
+                if (current.isVisibleToUser && current.isEnabled && current.isClickable &&
+                    current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                ) {
+                    current.recycle()
+                    target = null
+                    return true
                 }
+                val parent = current.parent
+                current.recycle()
+                target = parent
+            }
+            target?.recycle()
+
+            // Fallback: tap the center of the actual labeled node. This works for
+            // bottom-left, top-right, and other placements without fixed coordinates.
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (!bounds.isEmpty && bounds.width() > 0 && bounds.height() > 0) {
+                val path = Path().apply {
+                    moveTo(bounds.exactCenterX(), bounds.exactCenterY())
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+                    .build()
+                if (dispatchGesture(gesture, null, null)) return true
             }
         }
 
