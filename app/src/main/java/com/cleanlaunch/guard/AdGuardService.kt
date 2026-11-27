@@ -7,7 +7,6 @@ import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.view.View
 import android.view.WindowManager
-import android.provider.Settings
 
 /**
  * On-device ad navigation guard.
@@ -165,17 +164,23 @@ class AdGuardService : AccessibilityService() {
     }
 
     private fun updateAdTouchShield(root: AccessibilityNodeInfo) {
-        if (!Settings.canDrawOverlays(this)) {
-            removeAdTouchShield()
-            return
-        }
         val adBounds = mutableListOf<Rect>()
         val skipBounds = mutableListOf<Rect>()
         collectShieldTargets(root, adBounds, skipBounds, 0)
         val desired = mutableListOf<Rect>()
         for (ad in adBounds) {
             if (ad.width() <= 1 || ad.height() <= 1) continue
+            // If the skip control is not exposed in the accessibility tree,
+            // reserve a small lower-left safe zone for this known app's skip button.
             val skip = skipBounds.firstOrNull { Rect.intersects(ad, it) }
+                ?: if (lastProtectedPackage == "com.questions.liteai") {
+                    Rect(
+                        ad.left,
+                        ad.top + (ad.height() * 0.76f).toInt(),
+                        ad.left + (ad.width() * 0.34f).toInt(),
+                        ad.bottom
+                    )
+                } else null
             if (skip == null) {
                 desired.add(Rect(ad))
             } else {
@@ -203,7 +208,7 @@ class AdGuardService : AccessibilityService() {
             val params = WindowManager.LayoutParams(
                 rect.width(),
                 rect.height(),
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
