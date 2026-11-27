@@ -93,20 +93,20 @@ class AdGuardService : AccessibilityService() {
                 lastAdSignalAt = now
             }
 
-            // Keep skip-button handling scoped to an observed ad context.
-            if (protectedPackages.contains(pkg) &&
+            // Prefer the actual skip control (its position may vary, including
+            // the lower-left corner). Never assume a fixed screen coordinate.
+            val skipClicked = protectedPackages.contains(pkg) &&
                 now - lastAdSignalAt < 10_000 &&
-                hasSkipSignal
-            ) {
-                if (clickSkip(root, 0)) {
-                    recordBlock("识别并尝试点击广告跳过按钮")
-                }
+                hasSkipSignal &&
+                clickSkip(root, 0)
+            if (skipClicked) {
+                recordBlock("识别并尝试点击广告跳过按钮")
             }
 
-            // Some ad SDKs expose a dedicated "关闭广告X" control rather than
-            // a skip button. Click only that explicitly labelled, visible control
-            // while an ad signal is present; never click the whole ad container.
-            if (protectedPackages.contains(pkg) &&
+            // Use the explicit close-ad control only as a fallback when no
+            // visible skip control was successfully clicked.
+            if (!skipClicked &&
+                protectedPackages.contains(pkg) &&
                 now - lastAdSignalAt < 10_000 &&
                 hasAdSignal
             ) {
