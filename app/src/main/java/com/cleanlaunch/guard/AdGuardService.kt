@@ -94,21 +94,27 @@ class AdGuardService : AccessibilityService() {
             }
 
             val hasAdSignal = listOf(
-                "广告", "赞助内容", "推广", "sponsored", "advertisement", "ad choices"
+                "广告", "赞助内容", "推广", "sponsored", "advertisement", "ad choices",
+                "广告剩余", "广告倒计时", "精彩内容即将开始"
             ).any { content.contains(it) }
 
-            val hasSkipSignal = listOf("跳过", "skip").any { content.contains(it) }
+            val hasSkipSignal = listOf("跳过", "跳过广告", "略过", "skip", "skip ad")
+                .any { content.contains(it) }
+            // Some SDK ad containers expose no readable "广告" text at all.
+            // Treat the known visible ad-view class as an independent ad signal.
+            val hasAdContainer = protectedPackages.contains(pkg) && hasKnownAdContainer(root)
+            val isAdSurface = hasAdSignal || hasAdContainer
 
             // Shield only the known ad-content view, not the whole screen.
             // A visible skip button is cut out of the shield area when it overlaps.
-            if (protectedPackages.contains(pkg) && hasAdSignal) {
+            if (protectedPackages.contains(pkg) && isAdSurface) {
                 updateAdTouchShield(root)
             } else {
                 removeAdTouchShield()
             }
 
             if (protectedPackages.contains(pkg) &&
-                (hasAdSignal || (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED && hasSkipSignal))
+                (isAdSurface || (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED && hasSkipSignal))
             ) {
                 lastAdSignalAt = now
             }
@@ -161,6 +167,24 @@ class AdGuardService : AccessibilityService() {
         } finally {
             root.recycle()
         }
+    }
+
+    private fun hasKnownAdContainer(node: AccessibilityNodeInfo, depth: Int = 0): Boolean {
+        if (depth > 24) return false
+        val className = node.className?.toString().orEmpty()
+        if (node.isVisibleToUser && node.isEnabled &&
+            className.contains("NativeVideoAdView", ignoreCase = true)
+        ) return true
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = try {
+                hasKnownAdContainer(child, depth + 1)
+            } finally {
+                child.recycle()
+            }
+            if (found) return true
+        }
+        return false
     }
 
     private fun updateAdTouchShield(root: AccessibilityNodeInfo) {
@@ -378,10 +402,20 @@ class AdGuardService : AccessibilityService() {
             node.isVisibleToUser && node.isEnabled
         ) {
             if (node.isClickable && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            val targetBounds = Rect().also { node.getBoundsInScreen(it) }
             val parent = node.parent
             if (parent != null) {
                 try {
-                    if (parent.isClickable && parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+                    val parentBounds = Rect().also { parent.getBoundsInScreen(it) }
+                    val isReasonableTarget = parentBounds.width() > 0 &&
+                        parentBounds.height() > 0 &&
+                        parentBounds.width() <= targetBounds.width() * 4 &&
+                        parentBounds.height() <= targetBounds.height() * 4 &&
+                        Rect.intersects(parentBounds, targetBounds)
+                    if (isReasonableTarget && parent.isClickable &&
+                        parent.isVisibleToUser && parent.isEnabled &&
+                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    ) return true
                 } finally {
                     parent.recycle()
                 }
