@@ -3,6 +3,11 @@ package com.cleanlaunch.guard
 import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.graphics.PixelFormat
+import android.graphics.Rect
+import android.view.View
+import android.view.WindowManager
+import android.provider.Settings
 
 /**
  * On-device ad navigation guard.
@@ -16,6 +21,11 @@ class AdGuardService : AccessibilityService() {
     private var lastBackAt = 0L
     private var lastProtectedPackage: String? = null
     private var lastProtectedAt = 0L
+    private var shieldKey = ""
+    private val shieldViews = mutableListOf<View>()
+    private val windowManager by lazy {
+        getSystemService(WINDOW_SERVICE) as WindowManager
+    }
 
     private val protectedPackages = setOf(
         "com.kmxs.reader",       // 七猫免费小说
@@ -51,6 +61,9 @@ class AdGuardService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
+        if (!protectedPackages.contains(pkg)) {
+            removeAdTouchShield()
+        }
         val now = System.currentTimeMillis()
 
         // Remember the two apps being tested, so a later ad-triggered app switch
@@ -86,6 +99,14 @@ class AdGuardService : AccessibilityService() {
             ).any { content.contains(it) }
 
             val hasSkipSignal = listOf("跳过", "skip").any { content.contains(it) }
+
+            // Shield only the known ad-content view, not the whole screen.
+            // A visible skip button is cut out of the shield area when it overlaps.
+            if (protectedPackages.contains(pkg) && hasAdSignal) {
+                updateAdTouchShield(root)
+            } else {
+                removeAdTouchShield()
+            }
 
             if (protectedPackages.contains(pkg) &&
                 (hasAdSignal || (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED && hasSkipSignal))
@@ -141,6 +162,116 @@ class AdGuardService : AccessibilityService() {
         } finally {
             root.recycle()
         }
+    }
+
+    private fun updateAdTouchShield(root: AccessibilityNodeInfo) {
+        if (!Settings.canDrawOverlays(this)) {
+            removeAdTouchShield()
+            return
+        }
+        val adBounds = mutableListOf<Rect>()
+        val skipBounds = mutableListOf<Rect>()
+        collectShieldTargets(root, adBounds, skipBounds, 0)
+        val desired = mutableListOf<Rect>()
+        for (ad in adBounds) {
+            if (ad.width() <= 1 || ad.height() <= 1) continue
+            val skip = skipBounds.firstOrNull { Rect.intersects(ad, it) }
+            if (skip == null) {
+                desired.add(Rect(ad))
+            } else {
+                val cut = Rect(ad)
+                if (!cut.intersect(skip)) {
+                    desired.add(Rect(ad))
+                } else {
+                    addShieldRect(desired, ad.left, ad.top, ad.right, cut.top)
+                    addShieldRect(desired, ad.left, cut.bottom, ad.right, ad.bottom)
+                    addShieldRect(desired, ad.left, cut.top, cut.left, cut.bottom)
+                    addShieldRect(desired, cut.right, cut.top, ad.right, cut.bottom)
+                }
+            }
+        }
+        val key = desired.joinToString("|") { "${it.left},${it.top},${it.right},${it.bottom}" }
+        if (key == shieldKey) return
+        removeAdTouchShield()
+        if (desired.isEmpty()) return
+        for (rect in desired) {
+            val shield = View(this).apply {
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setOnTouchListener { _, _ -> true }
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            val params = WindowManager.LayoutParams(
+                rect.width(),
+                rect.height(),
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+                x = rect.left
+                y = rect.top
+            }
+            try {
+                windowManager.addView(shield, params)
+                shieldViews.add(shield)
+            } catch (_: Exception) {
+                // If the overlay cannot be added, do not interfere with the app.
+                removeAdTouchShield()
+                return
+            }
+        }
+        shieldKey = key
+    }
+
+    private fun collectShieldTargets(
+        node: AccessibilityNodeInfo,
+        adBounds: MutableList<Rect>,
+        skipBounds: MutableList<Rect>,
+        depth: Int
+    ) {
+        if (depth > 24) return
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        val className = node.className?.toString().orEmpty()
+        val label = ((node.text?.toString() ?: "") + " " +
+            (node.contentDescription?.toString() ?: "")).lowercase()
+        if (node.isVisibleToUser && node.isEnabled &&
+            className.contains("NativeVideoAdView", ignoreCase = true)
+        ) {
+            adBounds.add(Rect(bounds))
+        }
+        if (node.isVisibleToUser && node.isEnabled &&
+            (label.contains("跳过") || label.contains("skip"))
+        ) {
+            skipBounds.add(Rect(bounds))
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            try {
+                collectShieldTargets(child, adBounds, skipBounds, depth + 1)
+            } finally {
+                child.recycle()
+            }
+        }
+    }
+
+    private fun addShieldRect(out: MutableList<Rect>, left: Int, top: Int, right: Int, bottom: Int) {
+        if (right - left > 1 && bottom - top > 1) {
+            out.add(Rect(left, top, right, bottom))
+        }
+    }
+
+    private fun removeAdTouchShield() {
+        for (view in shieldViews.toList()) {
+            try {
+                windowManager.removeView(view)
+            } catch (_: Exception) {
+                // The window may already have been removed by the system.
+            }
+        }
+        shieldViews.clear()
+        shieldKey = ""
     }
 
     private fun containsSensorPermissionRequest(content: String): Boolean {
@@ -336,5 +467,12 @@ class AdGuardService : AccessibilityService() {
             .apply()
     }
 
-    override fun onInterrupt() = Unit
+    override fun onInterrupt() {
+        removeAdTouchShield()
+    }
+
+    override fun onDestroy() {
+        removeAdTouchShield()
+        super.onDestroy()
+    }
 }
