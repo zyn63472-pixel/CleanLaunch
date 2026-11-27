@@ -103,6 +103,18 @@ class AdGuardService : AccessibilityService() {
                 }
             }
 
+            // Some ad SDKs expose a dedicated "关闭广告X" control rather than
+            // a skip button. Click only that explicitly labelled, visible control
+            // while an ad signal is present; never click the whole ad container.
+            if (protectedPackages.contains(pkg) &&
+                now - lastAdSignalAt < 10_000 &&
+                hasAdSignal
+            ) {
+                if (clickAdClose(root, 0)) {
+                    recordBlock("识别并尝试点击关闭广告按钮")
+                }
+            }
+
             val isSystemUi = pkg.startsWith("com.android.systemui") ||
                 pkg.startsWith("com.google.android.inputmethod") ||
                 pkg.contains("inputmethod") ||
@@ -174,6 +186,45 @@ class AdGuardService : AccessibilityService() {
             val child = node.getChild(i) ?: continue
             val clicked = try {
                 clickByLabels(child, labels, depth + 1)
+            } finally {
+                child.recycle()
+            }
+            if (clicked) return true
+        }
+        return false
+    }
+
+    private fun clickAdClose(node: AccessibilityNodeInfo, depth: Int): Boolean {
+        if (depth > 20) return false
+        val label = ((node.text?.toString() ?: "") + " " +
+            (node.contentDescription?.toString() ?: "")).lowercase()
+
+        val isExplicitAdClose = label.contains("关闭广告") ||
+            label.contains("close ad") ||
+            label.contains("close advertisement")
+
+        if (isExplicitAdClose && node.isVisibleToUser && node.isEnabled) {
+            if (node.isClickable &&
+                node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ) return true
+            val parent = node.parent
+            if (parent != null) {
+                try {
+                    if (parent.isClickable &&
+                        parent.isVisibleToUser &&
+                        parent.isEnabled &&
+                        parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    ) return true
+                } finally {
+                    parent.recycle()
+                }
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val clicked = try {
+                clickAdClose(child, depth + 1)
             } finally {
                 child.recycle()
             }
