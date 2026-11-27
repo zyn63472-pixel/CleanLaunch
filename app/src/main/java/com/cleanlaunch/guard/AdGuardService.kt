@@ -68,7 +68,6 @@ class AdGuardService : AccessibilityService() {
             // body sensors / motion sensors / gyroscope. Do not touch camera,
             // microphone, photos, or unrelated permission prompts.
             if (permissionControllerPackages.contains(pkg) &&
-                now - lastProtectedAt < 15_000 &&
                 containsSensorPermissionRequest(content)
             ) {
                 if (clickByLabels(root, denyWords)) {
