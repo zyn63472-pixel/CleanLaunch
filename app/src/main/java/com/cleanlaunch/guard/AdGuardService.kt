@@ -19,6 +19,7 @@ class AdGuardService : AccessibilityService() {
     private var lastBackAt = 0L
     private var lastProtectedPackage: String? = null
     private var lastProtectedAt = 0L
+    private var lastDiagnosticAt = 0L
 
     private val protectedPackages = setOf(
         "com.kmxs.reader",       // 七猫免费小说
@@ -63,9 +64,20 @@ class AdGuardService : AccessibilityService() {
             lastProtectedAt = now
         }
 
-        val root = rootInActiveWindow ?: return
+        val root = rootInActiveWindow
+        if (root == null) {
+            if (protectedPackages.contains(pkg) && now - lastDiagnosticAt > 800) {
+                lastDiagnosticAt = now
+                saveDiagnostic("pkg=" + pkg + " event=" + event.eventType + "; rootInActiveWindow=null")
+            }
+            return
+        }
         try {
             val content = StringBuilder().also { collectText(root, it, 0) }.toString().lowercase()
+            if (protectedPackages.contains(pkg) && now - lastDiagnosticAt > 800) {
+                lastDiagnosticAt = now
+                saveDiagnostic(buildDiagnostic(pkg, event.eventType, root, content))
+            }
 
             // Deny only a system permission dialog that explicitly refers to
             // body sensors / motion sensors / gyroscope. Do not touch camera,
@@ -128,6 +140,60 @@ class AdGuardService : AccessibilityService() {
         } finally {
             root.recycle()
         }
+    }
+
+
+    private fun buildDiagnostic(
+        pkg: String,
+        eventType: Int,
+        root: AccessibilityNodeInfo,
+        content: String
+    ): String {
+        val out = StringBuilder()
+        out.append("pkg=").append(pkg)
+            .append(" event=").append(eventType)
+            .append(" text=").append(content.take(240))
+            .append("\\n")
+        appendNodeDiagnostics(root, out, 0, intArrayOf(0))
+        return out.toString().take(3500)
+    }
+
+    private fun appendNodeDiagnostics(
+        node: AccessibilityNodeInfo,
+        out: StringBuilder,
+        depth: Int,
+        count: IntArray
+    ) {
+        if (depth > 12 || count[0] >= 35) return
+        val text = node.text?.toString().orEmpty()
+        val desc = node.contentDescription?.toString().orEmpty()
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        out.append(" ".repeat(depth.coerceAtMost(8)))
+            .append(node.className?.toString()?.substringAfterLast('.') ?: "?")
+            .append(" t=").append(text.take(50))
+            .append(" d=").append(desc.take(50))
+            .append(" click=").append(node.isClickable)
+            .append(" enabled=").append(node.isEnabled)
+            .append(" vis=").append(node.isVisibleToUser)
+            .append(" b=").append(bounds.flattenToString())
+            .append("\\n")
+        count[0]++
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            try {
+                appendNodeDiagnostics(child, out, depth + 1, count)
+            } finally {
+                child.recycle()
+            }
+            if (count[0] >= 35) break
+        }
+    }
+
+    private fun saveDiagnostic(value: String) {
+        getSharedPreferences("cleanlaunch", MODE_PRIVATE).edit()
+            .putString("last_diagnostic", value)
+            .apply()
     }
 
     private fun containsSensorPermissionRequest(content: String): Boolean {
