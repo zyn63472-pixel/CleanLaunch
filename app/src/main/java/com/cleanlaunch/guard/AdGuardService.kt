@@ -60,7 +60,11 @@ class AdGuardService : AccessibilityService() {
             lastProtectedAt = now
         }
 
-        val root = rootInActiveWindow ?: return
+        val root = rootInActiveWindow
+        if (protectedPackages.contains(pkg)) {
+            recordDiagnostic(event, pkg, root)
+        }
+        if (root == null) return
         try {
             val content = StringBuilder().also { collectText(root, it, 0) }.toString().lowercase()
 
@@ -207,6 +211,70 @@ class AdGuardService : AccessibilityService() {
             if (clicked) return true
         }
         return false
+    }
+
+    // Diagnostic capture is deliberately read-only: it does not change ad detection,
+    // click handling, or redirect protection. Data stays in local app preferences.
+    private fun recordDiagnostic(
+        event: AccessibilityEvent,
+        pkg: String,
+        root: AccessibilityNodeInfo?
+    ) {
+        try {
+            val out = StringBuilder()
+            out.append("时间：").append(java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.getDefault())
+                .format(java.util.Date())).append('\n')
+            out.append("包名：").append(pkg).append('\n')
+            out.append("事件类型：").append(event.eventType).append('\n')
+            out.append("事件文本：")
+                .append(event.text.joinToString(" ") { it?.toString() ?: "" })
+                .append('\n')
+            if (root == null) {
+                out.append("活动窗口：无法读取（rootInActiveWindow=null）")
+            } else {
+                out.append("窗口节点：\n")
+                appendDiagnosticNodes(root, out, 0, intArrayOf(0))
+            }
+            getSharedPreferences("cleanlaunch", MODE_PRIVATE).edit()
+                .putString("last_diagnostic", out.toString().take(12000))
+                .apply()
+        } catch (_: Exception) {
+            // Diagnostics must never interfere with the original interception flow.
+        }
+    }
+
+    private fun appendDiagnosticNodes(
+        node: AccessibilityNodeInfo,
+        out: StringBuilder,
+        depth: Int,
+        count: IntArray
+    ) {
+        if (depth > 24 || count[0] >= 100 || out.length >= 11000) return
+        count[0]++
+        val text = node.text?.toString()?.trim().orEmpty()
+        val desc = node.contentDescription?.toString()?.trim().orEmpty()
+        if (text.isNotEmpty() || desc.isNotEmpty() || node.isClickable) {
+            val bounds = android.graphics.Rect()
+            node.getBoundsInScreen(bounds)
+            out.append("  ".repeat(depth.coerceAtMost(12)))
+                .append("class=").append(node.className ?: "")
+                .append(" text=").append(text.take(100))
+                .append(" desc=").append(desc.take(100))
+                .append(" clickable=").append(node.isClickable)
+                .append(" enabled=").append(node.isEnabled)
+                .append(" visible=").append(node.isVisibleToUser)
+                .append(" bounds=").append(bounds.flattenToString())
+                .append('\n')
+        }
+        for (i in 0 until node.childCount) {
+            if (count[0] >= 100 || out.length >= 11000) break
+            val child = node.getChild(i) ?: continue
+            try {
+                appendDiagnosticNodes(child, out, depth + 1, count)
+            } finally {
+                child.recycle()
+            }
+        }
     }
 
     private fun recordBlock(message: String) {
