@@ -96,7 +96,7 @@ class AdGuardService : AccessibilityService() {
                 "广告", "赞助内容", "推广", "sponsored", "advertisement", "ad choices"
             ).any { content.contains(it) }
 
-            val hasSkipSignal = listOf("跳过", "skip").any { content.contains(it) }
+            val hasSkipSignal = listOf("跳过", "skip", "关闭广告", "close ad").any { content.contains(it) }
 
             if (protectedPackages.contains(pkg) &&
                 (hasAdSignal || (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED && hasSkipSignal))
@@ -253,7 +253,9 @@ class AdGuardService : AccessibilityService() {
             (node.contentDescription?.toString() ?: "")).lowercase()
         val isSkipLabel = label.contains("跳过") ||
             label.contains("skip") ||
-            label.contains("跳过广告")
+            label.contains("跳过广告") ||
+            label.contains("关闭广告") ||
+            label.contains("close ad")
 
         if (isSkipLabel && node.isVisibleToUser && node.isEnabled) {
             // The text node itself is often not clickable. Walk several ancestors
